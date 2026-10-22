@@ -3,7 +3,8 @@
 # update-blocker.sh — macOS 系统更新屏蔽工具
 #
 # 一键使用：
-#   curl -sSL https://raw.githubusercontent.com/dennischancs/mac-block-updates/main/update-blocker.sh | sudo bash
+#   curl -sSL https://cdn.jsdelivr.net/gh/dennischancs/mac-block-updates@main/install.sh | bash
+#   （install.sh 会自动在多个镜像源之间回退，raw 域不通时也能装上）
 #
 # 核心机制（与社区方案的差异见 docs/FINDINGS.md）：
 #   系统真正读取的是「托管偏好文件」，不是描述文件本体。
@@ -986,8 +987,11 @@ macOS 系统更新屏蔽工具  v$VERSION
   uninstall             彻底卸载（含恢复与停用复查）
   help                  显示本帮助
 
-一键安装（推荐）：
-  curl -sSL https://raw.githubusercontent.com/dennischancs/mac-block-updates/main/update-blocker.sh | sudo bash
+一键安装（推荐，自动多源回退）：
+  curl -sSL https://cdn.jsdelivr.net/gh/dennischancs/mac-block-updates@main/install.sh | bash
+
+  装到本地后用：
+  sudo ./update-blocker.sh [命令]
 
 当前系统：macOS $(macos_version)
 EOF

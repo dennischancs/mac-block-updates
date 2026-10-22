@@ -12,22 +12,30 @@
 **一键安装（Shell 版）**：
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/dennischancs/mac-block-updates/main/update-blocker.sh | sudo bash
+curl -sSL https://cdn.jsdelivr.net/gh/dennischancs/mac-block-updates@main/install.sh | bash
 ```
+
+安装器会自动在多个镜像源之间回退（jsDelivr → GitHub Raw → ghfast），
+`raw.githubusercontent.com` 连不通时也能装上。
 
 ---
 
 ## 30 秒上手
 
 ```bash
-# 屏蔽大版本升级（默认延迟 3650 天 ≈ 10 年）
-curl -sSL https://raw.githubusercontent.com/dennischancs/mac-block-updates/main/update-blocker.sh | sudo bash
+# 装到本地（自动多源回退）
+curl -sSL -o install.sh \
+  https://cdn.jsdelivr.net/gh/dennischancs/mac-block-updates@main/install.sh
+chmod +x install.sh && ./install.sh
+
+# 或者直接跑（下载即用，不落盘）
+curl -sSL https://cdn.jsdelivr.net/gh/dennischancs/mac-block-updates@main/update-blocker.sh | sudo bash
 
 # 想看状态
-sudo bash update-blocker.sh status
+sudo ./update-blocker.sh status
 
 # 想恢复
-sudo bash update-blocker.sh restore
+sudo ./update-blocker.sh restore
 ```
 
 ---
@@ -36,23 +44,36 @@ sudo bash update-blocker.sh restore
 
 ### 两种用法
 
-**管道安装**（临时用，不落盘）：
+**一键安装器**（推荐，自动多源回退）：
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/dennischancs/mac-block-updates/main/update-blocker.sh | sudo bash
+curl -sSL https://cdn.jsdelivr.net/gh/dennischancs/mac-block-updates@main/install.sh | bash
 ```
 
-**下载后运行**（推荐，可反复用、可看源码）：
+安装器会依次尝试 jsDelivr → GitHub Raw → ghfast 三个源，
+任何一个可用就能装上，三个都不通会明确报错并给出手动方案。
+
+**下载后运行**（可反复用、可看源码）：
 
 ```bash
 curl -sSL -o update-blocker.sh \
-  https://raw.githubusercontent.com/dennischancs/mac-block-updates/main/update-blocker.sh
+  https://cdn.jsdelivr.net/gh/dennischancs/mac-block-updates@main/update-blocker.sh
 chmod +x update-blocker.sh
 sudo ./update-blocker.sh          # 不带参数 = 图形菜单
 sudo ./update-blocker.sh block    # 或者直接给命令
 ```
 
+**管道直跑**（临时用，不落盘）：
+
+```bash
+curl -sSL https://cdn.jsdelivr.net/gh/dennischancs/mac-block-updates@main/update-blocker.sh | sudo bash
+```
+
 管道模式跑的是脚本内嵌的 awk 逻辑，功能完全一致。
+
+> **为什么不用 `raw.githubusercontent.com` 作为首选？**
+> 该域名在部分网络环境下连不通（实测在这台机器上旧仓库的 raw 地址
+> 同样超时，而 jsDelivr 正常）。安装器会三个源依次试，总有一个能用。
 
 ### 命令
 
