@@ -32,7 +32,7 @@ fail() { printf '%s\n' "$*" >&2; }
 # 选一个能用的源
 PICKED=""
 for url in $MIRRORS; do
-    log "[..] 尝试：${url%%/main/*}/main/${SCRIPT_NAME}"
+    log "[..] 尝试：${url}"
     if curl -fsSL --connect-timeout 8 --max-time 90 "$url" -o /tmp/mac-block-updates.sh 2>/dev/null; then
         # 校验拿到的是不是一个合理的 shell 脚本
         if head -1 /tmp/mac-block-updates.sh | grep -qE '^#!.*(ba)?sh'; then
