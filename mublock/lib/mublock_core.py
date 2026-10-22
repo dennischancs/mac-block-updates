@@ -13,7 +13,8 @@
 
 直接写这两个文件（root 权限，0644）就能压制大版本升级，
 完全不需要描述文件、不需要 GUI、不需要人工点确认。 [A级：实测 A/B 验证——
-删掉文件 macOS 27.0.1 立刻回来，写回去立刻变成 "No new software available"，
+删掉文件则大版本立刻重新出现在 softwareupdate --list 里，写回去则变成
+"No new software available"，
 且全程 profiles list -all 显示"没有装任何描述文件"]
 
 描述文件（.mobileconfig）之所以在社区方案里是主角，是因为它是由 MDM
@@ -32,7 +33,7 @@
     并照常生效，90 不是本路径的硬约束。 [A级]
   * 延迟的计时起点是 Apple 的发布日期，不是描述文件的安装日期。 [B级：官方文档+社区]
 
-═══ 本机环境的额外坑 ═══
+═══ 环境相关的额外坑 ═══
 
   * SwitchHosts 以 write_mode=append 托管 /etc/hosts，它的 jt() 算法只保留
     `# --- SWITCHHOSTS_CONTENT_START ---` 之前的头部，标记之后的内容每次

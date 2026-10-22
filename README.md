@@ -72,8 +72,8 @@ curl -sSL https://cdn.jsdelivr.net/gh/dennischancs/mac-block-updates@main/update
 管道模式跑的是脚本内嵌的 awk 逻辑，功能完全一致。
 
 > **为什么不用 `raw.githubusercontent.com` 作为首选？**
-> 该域名在部分网络环境下连不通（实测在这台机器上旧仓库的 raw 地址
-> 同样超时，而 jsDelivr 正常）。安装器会三个源依次试，总有一个能用。
+> 该域名在部分网络环境下连不通（国内尤甚），而 jsDelivr 通常正常。
+> 安装器会三个源依次试，总有一个能用。
 
 ### 命令
 
@@ -107,7 +107,7 @@ sudo ./update-blocker.sh major-only
 git clone https://github.com/dennischancs/mac-block-updates.git
 cd mac-block-updates
 
-./mublock/mublock doctor     # 体检：看看这台机器能不能自动装
+./mublock/mublock doctor     # 体检：看看当前环境能不能自动装
 sudo ./mublock/mublock apply # 上屏蔽
 ./mublock/mublock verify     # 验证
 ./mublock/mublock status     # 各层状态

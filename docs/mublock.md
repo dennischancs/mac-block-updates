@@ -1,25 +1,27 @@
 # mublock — macOS 大版本升级屏蔽工具
 
-> 目标：让这台 Mac 停在当前 macOS 版本，不再被大版本升级（现在是 macOS 27）反复骚扰。
+> 目标：让 Mac 停在当前 macOS 版本，不再被大版本升级反复骚扰。
 > 做法来自 [eatmoreduck 的博客](https://blog.xiaohuangyu.space/p/block-macos-updates/)，
-> 但**本机实测发现博客方案有 4 处关键偏差**，已全部修正 —— 详见下文「与博客的偏差」。
+> 但**实测发现博客方案有 4 处关键偏差**，已全部修正 —— 详见下文「与博客的偏差」。
 
 ---
 
-## 这台机器当前的实际状态
+## 三层结构与验证方式
 
-已应用（`mublock apply` 跑通并逐项验证过）：
+`mublock apply` 会同时上三层，每层都有可独立验证的判据：
 
-| 层 | 状态 | 证据 |
+| 层 | 作用 | 验证方式 |
 |---|---|---|
-| 托管偏好（延迟） | ✅ 生效，3650 天 | `/Library/Managed Preferences/com.apple.SoftwareUpdate.plist` |
-| 小红点压制 | ✅ 生效 | `SkipSetupItems=[SoftwareUpdate, UpdateCompleted]` |
-| hosts 屏蔽 | ✅ 在位（第 11–21 行）且位于 SwitchHosts 标记（第 23 行）**之前** | 解析实测 `swscan.apple.com → 127.0.0.1` |
-| 系统域偏好 | ✅ 5 个开关全关 | `defaults read /Library/Preferences/com.apple.SoftwareUpdate` |
+| 托管偏好（延迟） | 压制大版本升级 | 读 `/Library/Managed Preferences/com.apple.SoftwareUpdate.plist`，确认延迟天数为 3650 |
+| 小红点压制 | 消除设置里的更新角标 | 读同目录的 `com.apple.SetupAssistant.managed.plist`，确认 `SkipSetupItems=[SoftwareUpdate, UpdateCompleted]` |
+| hosts 屏蔽 | 拦截更新服务器网络访问 | 解析 `swscan.apple.com`，确认返回 `127.0.0.1`；且屏蔽块必须位于 SwitchHosts 标记**之前** |
+| 系统域偏好 | 关掉自动检查/下载/安装 | `defaults read /Library/Preferences/com.apple.SoftwareUpdate`，确认 5 个开关为关 |
 
-`mublock verify` 的结论是 `degraded`——意思是
-**"延迟层已生效，但 hosts 层同时拦住了更新目录，所以没法用 `softwareupdate --list` 二次交叉验证"**。
-这不是故障。
+判定结论有三档，工具会如实区分，不会把「网络被堵」误报成「屏蔽生效」：
+
+- `effective` — 延迟层生效，且更新目录可达（可二次交叉验证）
+- `degraded` — 延迟层生效，但 hosts 层同时拦住了更新目录，无法二次交叉验证。**这不是故障**
+- `inactive` — 延迟层没生效
 
 ### 想让次要/安全更新能正常收到？
 
@@ -40,7 +42,7 @@ hosts 层拦的是整个更新目录，不只是大版本。想只压大版本�
 ```bash
 cd mac-block-updates
 
-/usr/bin/python3 mublock doctor     # 先体检：看看这台机器能不能自动装
+/usr/bin/python3 mublock doctor     # 先体检：看看当前环境能不能自动装
 /usr/bin/python3 mublock apply      # 上屏蔽（会弹一次管理员密码）
 /usr/bin/python3 mublock verify     # 验证：macOS 27 是否真的被压住
 /usr/bin/python3 mublock status     # 看各层当前状态
@@ -51,10 +53,10 @@ cd mac-block-updates
 
 `apply` / `restore` 各自**只弹一次管理员密码框**（所有特权操作合并成一次）。
 
-> **当前这台机器的推荐配置是 `apply --no-hosts`**：
+> **推荐配置是 `apply --no-hosts`**：
 > 托管偏好层是**精确**的——只压大版本升级，次要/安全更新照常能收到；
 > hosts 层是**粗暴**的——它把整个更新目录都拦了，连安全更新都收不到。
-> 你已经在 26.7.1（2026-10 刚推的），没必要为安全更新冒这个险。
+> 如果你的系统版本较新，没必要为安全更新冒这个险。
 > 想两样都要就跑 `mublock apply`（默认行为）。
 
 ---
@@ -64,24 +66,24 @@ cd mac-block-updates
 1. **系统真正读的是「托管偏好文件」，不是描述文件。** 直接写
    `/Library/Managed Preferences/com.apple.SoftwareUpdate.plist` 就能压制大版本升级，
    不需要描述文件、不需要 GUI、不需要人工点确认。
-2. **本机最大的坑是 SwitchHosts 托管着 `/etc/hosts`**，它每次刷新会重写标记之后的全部内容，
-   博客说的"追加到文件末尾"在这台机器上**每小时被抹掉一次**。屏蔽块必须放在
-   `# --- SWITCHHOSTS_CONTENT_START ---` 标记**之前**。
-3. **你已经在 macOS 26.7.1 上了**——博客要挡的是 macOS 26，但 26 早就装好了。
-   现在真正在骚扰你的是 **macOS 27.0.1**（17.9 GB，已上架），本工具挡的是它。
+2. **如果你的机器上装了 SwitchHosts（或其他托管 `/etc/hosts` 的工具）**，这是最大的坑：
+   它每次刷新会重写标记之后的全部内容，博客说的"追加到文件末尾"会**每小时被抹掉一次**。
+   屏蔽块必须放在 `# --- SWITCHHOSTS_CONTENT_START ---` 标记**之前**。
+3. **工具挡的是"当前这个大版本"**。macOS 大版本发布后，工具会把新版本一并压住，
+   直到你主动 `restore`。
 
 ---
 
 ## 与博客的偏差（4 处，全部实测）
 
-| # | 博客说法 | 本机实测 | 证据 |
+| # | 博客说法 | 实测结论 | 证据 |
 |---|---|---|---|
-| 1 | 目标 = 屏蔽 macOS 26 升级 | 本机已是 26.7.1，实际要挡的是 **macOS 27.0.1** | `softwareupdate --list` 显示 27.0.1 / 17.9 GB |
+| 1 | 目标 = 屏蔽某一个固定大版本 | 延迟是**按版本**生效的：当前上架的大版本会被压住 | `softwareupdate --list` 在压制前后从"列出大版本"变成 "No new software available" |
 | 2 | 描述文件靠 GUI 装 | macOS 26 **已移除 `profiles install`**（报 "profiles tool no longer supports installs"）。而 `open` 装文件**只有系统里一个描述文件都没有时才免交互**，只要已存在任何一个，新文件就进「待确认」队列需人工点确认 —— **与标识符是否相同无关** | 实测：清空后 `open` 2 秒装上；有残留时 `open` 30 秒不生效 |
 | 3 | 90 天是硬上限，要定期重装 | **90 不是本路径的硬约束。**填 3650 天系统照单全收并照常生效 | 托管偏好里原样存了 3650，`softwareupdate --list` 仍为 "No new software available" |
 | 4 | hosts 条目追加到文件末尾 | **在有 SwitchHosts 的机器上会被抹掉。**它的 `jt()` 算法只保留标记之前的头部 | 实测：追加后约 1 小时内消失；改成放标记之前后存活 |
 
-> 博客的第四步（用 iMazing / Apple Configurator 手工做 profile）在本机**不必要**：
+> 博客的第四步（用 iMazing / Apple Configurator 手工做 profile）**不必要**：
 > 描述文件只是"运输工具"，真正生效的是它落到托管偏好里的那几行键。
 > 我们直接写托管偏好，一步到位。`mublock profile generate` 仍可生成 profile 供查看。
 
@@ -122,7 +124,7 @@ cd mac-block-updates
 - 后者 = 消除「系统设置」图标上的更新小红点
 
 **这是独立生效的机制**：实测在系统里**没有装任何描述文件**的情况下，
-仅写这两个文件就能让 `softwareupdate --list` 从列出 macOS 27.0.1 变成 "No new software available"。
+仅写这两个文件就能让 `softwareupdate --list` 从"列出当前大版本"变成 "No new software available"。
 
 ### 层 2：hosts（纵深防御，可选，`--no-hosts` 可跳过）
 
@@ -138,7 +140,7 @@ cd mac-block-updates
 ```
 
 **代价**：它拦的是整个更新目录，不只是大版本 —— 次要/安全更新也会一并收不到。
-所以这台机器上的推荐配置是 `apply --no-hosts`：托管偏好层已经足够精确。
+所以推荐配置是 `apply --no-hosts`：托管偏好层已经足够精确。
 
 ### 层 3：定期复查（可选）
 
@@ -189,10 +191,10 @@ cd mac-block-updates
 - **hosts 层是否真正生效，取决于解析器缓存**，所以工具会**实测解析结果**再下结论，
   不会只看"文件里有没有那几行"就报成功。
 
-- 我在**这台真实机器**上做过完整的 A/B 验证（删掉→macOS 27 回来；写回→消失），
-  但**没有在别的 Mac / 别的 macOS 版本上验证过**。
+- 已做过完整的 A/B 验证（删掉托管偏好 → 大版本重新出现；写回 → 消失）。
+  但**没有在多台不同的 Mac / 不同的 macOS 版本上验证过**。
 
-- 我是**一个人**在做这件事，没有第二个人独立审查。
+- 本项目是**一个人**在做，没有第二个人独立审查。
   唯一真正独立的验证是**机械检查**：`softwareupdate --list` 的实际输出、
   `plutil -lint` 的 plist 合法性、测试套件的断言。
 
