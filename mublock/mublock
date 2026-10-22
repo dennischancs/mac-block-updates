@@ -1,0 +1,524 @@
+#!/usr/bin/env python3
+"""mublock — macOS 大版本升级屏蔽工具。
+
+子命令：
+  status    查看各层当前状态（只读）
+  apply     应用全部屏蔽层
+  restore   撤销全部屏蔽层
+  verify    实测验证：macOS 大版本是否真的被压住
+  watch     定期复查并自动修复（配合 launchd）
+  profile   生成/安装描述文件（可单独调用）
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+
+import mublock_core as core  # noqa: E402
+
+LAUNCHD_LABEL = "local.mublock.watch"
+LAUNCHD_PATH = os.path.expanduser(f"~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist")
+LOG_DIR = os.path.expanduser("~/Library/Logs/mublock")
+LOG_FILE = os.path.join(LOG_DIR, "watch.log")
+
+
+# --------------------------------------------------------------------------
+# status
+# --------------------------------------------------------------------------
+
+
+def cmd_status(args) -> int:
+    core.log("=" * 62)
+    core.log(f" mublock 状态报告   macOS {core.current_os()}")
+    core.log("=" * 62)
+
+    # --- 描述文件层 ---
+    core.log("[1] 托管偏好层（核心）")
+    delay = core.deferral_active_value()
+    if delay is not None:
+        core.ok(f"已生效，延迟 {delay} 天")
+    else:
+        core.warn("未生效")
+    if core.badge_suppressed():
+        core.ok("小红点压制已生效（SkipSetupItems）")
+    else:
+        core.warn("小红点压制未生效")
+    for name, data in core.managed_prefs().items():
+        if isinstance(data, dict):
+            core.log(f"    {name}: {data}")
+        else:
+            core.log(f"    {name}: 缺失")
+
+    # --- hosts 层 ---
+    core.log("\n[2] hosts 层（网络层拦截）")
+    try:
+        text = core.read_hosts()
+        present = core.hosts_block_present(text)
+        pos = core.hosts_block_position(text)
+        if not present:
+            core.warn("屏蔽块不存在")
+        elif pos == "before":
+            core.ok("屏蔽块在位，且位于 SwitchHosts 标记之前（刷新后仍存活）")
+        else:
+            core.warn(f"屏蔽块在位但位置错误（{pos}）——SwitchHosts 刷新后会抹掉")
+        if present:
+            if core.hosts_actually_blocking():
+                core.ok("解析器实测：屏蔽已生效（解析到 127.0.0.1）")
+            else:
+                core.warn("解析器实测：屏蔽未生效（解析器仍走 DNS）")
+    except RuntimeError as exc:
+        core.warn(str(exc))
+
+    if core.switchhosts_present():
+        core.log(f"    检测到 SwitchHosts（write_mode={core.switchhosts_write_mode()}）")
+        core.log("    → 屏蔽块必须放在 SWITCHHOSTS_CONTENT_START 标记之前")
+    else:
+        core.log("    未检测到 SwitchHosts")
+
+    # --- SoftwareUpdate 偏好层 ---
+    core.log("\n[3] SoftwareUpdate 偏好层（系统域）")
+    flags = core.software_update_flags()
+    for flag, value in flags.items():
+        state = "关闭" if value == "0" else ("开启" if value == "1" else "未设置")
+        core.log(f"    {flag} = {value if value is not None else '—'}  ({state})")
+
+    # --- 观察层 ---
+    core.log("\n[4] 实际效果")
+    st = core.effective_status()
+    core.log(f"    延迟层已安装：{'是' if st['deferral_installed'] else '否'}"
+             + (f"（{st['delay_days']} 天）" if st["delay_days"] else ""))
+    core.log(f"    更新目录可达：{'是' if st['catalog_reachable'] else '否'}")
+    if st["catalog_reachable"]:
+        pending, why = core.pending_major_update()
+        if pending:
+            core.warn("仍能看到以下更新：")
+            for p in pending:
+                core.log(f"    - {p}")
+        else:
+            core.ok("目录里没有可升级的大版本")
+    else:
+        core.log("    （目录不可达，本项无法交叉验证——hosts 层正在起作用）")
+
+    core.log("")
+    concl = st["conclusion"]
+    if concl == "effective":
+        core.ok("结论：屏蔽生效")
+    elif concl == "degraded":
+        core.warn("结论：延迟层已生效，但网络层同时拦截，无法交叉验证")
+    else:
+        core.fail("结论：屏蔽未生效")
+    core.log("")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# apply / restore
+# --------------------------------------------------------------------------
+
+
+def cmd_apply(args) -> int:
+    core.log("=" * 62)
+    core.log(" mublock apply")
+    core.log("=" * 62)
+    core.log("")
+
+    results = core.apply_all(args.delay, with_hosts=not args.no_hosts)
+
+    core.log("")
+    core.log("-" * 62)
+    failed = 0
+    for name, key in (
+        ("托管偏好（核心：延迟 + 小红点 + 自动更新）", "deferral"),
+        ("hosts 屏蔽", "hosts"),
+    ):
+        if key == "hosts" and args.no_hosts:
+            core.log(f"[skip] {name}：按 --no-hosts 跳过")
+            continue
+        if results.get(key):
+            core.ok(f"{name}：完成")
+        else:
+            core.fail(f"{name}：未完成")
+            failed += 1
+    core.log("-" * 62)
+
+    if args.watch:
+        core.log("")
+        if install_watch():
+            core.ok("定期复查已启用（launchd，每小时一次）")
+        else:
+            core.warn("定期复查启用失败（不影响已应用的屏蔽）")
+
+    core.log("")
+    core.log("验证：")
+    st = core.effective_status()
+    if st["conclusion"] == "inactive":
+        core.fail("延迟层未生效")
+    elif st["catalog_reachable"]:
+        pending, _ = core.pending_major_update()
+        if pending:
+            core.warn(f"仍有可见更新：{pending}")
+        else:
+            core.ok("已无可用更新")
+    else:
+        core.ok("延迟层已生效（网络层同时拦截，目录不可达属预期）")
+    return 1 if failed else 0
+
+
+def cmd_restore(args) -> int:
+    core.log("=" * 62)
+    core.log(" mublock restore —— 撤销全部屏蔽")
+    core.log("=" * 62)
+    core.log("")
+
+    uninstall_watch()
+
+    results = core.restore_all(with_hosts=not args.keep_hosts)
+    core.log("")
+    if results.get("deferral_gone"):
+        core.ok("延迟层已撤销")
+    else:
+        core.warn("延迟层仍在生效（可能未能完全移除）")
+    if args.keep_hosts:
+        core.log("[skip] hosts 屏蔽块：按 --keep-hosts 保留")
+    elif results.get("hosts_gone"):
+        core.ok("hosts 屏蔽块已移除")
+    else:
+        core.warn("hosts 屏蔽块可能仍在")
+
+    core.log("")
+    core.ok("已撤销。按需到「系统设置 → 通用 → 软件更新」重新打开自动更新。")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# verify
+# --------------------------------------------------------------------------
+
+
+def cmd_verify(args) -> int:
+    """实测验证。不看配置，只看效果——并且不产生假阳性。"""
+    core.log("=== mublock verify ===")
+    core.log(f"macOS {core.current_os()}")
+    core.log("")
+    st = core.effective_status()
+
+    core.log("1) 托管偏好（延迟层）是否生效：", end="")
+    core.log(
+        f"是，延迟 {st['delay_days']} 天"
+        if st["deferral_installed"]
+        else "否"
+    )
+    core.log("2) 小红点是否压制：", end="")
+    core.log("是" if core.badge_suppressed() else "否")
+
+    core.log("3) hosts 层：", end="")
+    if not st["hosts_present"]:
+        core.log("无屏蔽块")
+    elif st["hosts_position"] != "before":
+        core.log(f"屏蔽块位置错误（{st['hosts_position']}）")
+    elif st["hosts_effective"]:
+        core.log("屏蔽块在位、位置正确、解析器实测生效")
+    else:
+        core.log("屏蔽块在位、位置正确，但解析器实测未生效（仍走 DNS）")
+
+    core.log("4) 更新目录可达性：", end="")
+    core.log("可达" if st["catalog_reachable"] else "不可达（网络层在拦截）")
+
+    core.log("5) softwareupdate --list：")
+    if not st["catalog_reachable"]:
+        core.log("    跳过——目录不可达时会挂起，且结果无法区分"
+                 "「延迟生效」与「网络被堵」")
+    else:
+        pending, _ = core.pending_major_update()
+        if pending:
+            for p in pending:
+                core.log(f"    - {p}")
+        else:
+            core.log("    无可用更新")
+
+    core.log("")
+    concl = st["conclusion"]
+    core.log("结论：", end="")
+    if concl == "effective":
+        core.log("屏蔽生效")
+    elif concl == "degraded":
+        core.log("延迟层生效，但网络层同时拦截，无法交叉验证")
+    else:
+        core.log("屏蔽未完全生效")
+    return 0 if concl in ("effective", "degraded") else 1
+
+
+# --------------------------------------------------------------------------
+# profile
+# --------------------------------------------------------------------------
+
+
+def cmd_profile(args) -> int:
+    """描述文件相关（备用路径）。
+
+    托管偏好直接写就够了，描述文件只是"可见版"——好处是在
+    「系统设置 → 描述文件」里能看见改了什么、也能自行移除。
+    """
+    if args.action == "generate":
+        payload = core.build_profile(args.delay)
+        with open(core.PROFILE_PATH, "wb") as fh:
+            fh.write(payload)
+        core.ok(f"已生成 {core.PROFILE_PATH}")
+        core.log("")
+        core.log("双击安装。注意：系统里若已有其它配置描述文件，")
+        core.log("它会进「待确认」队列，需去系统设置里手动点一次确认。")
+        return 0
+    elif args.action == "install":
+        payload = core.build_profile(args.delay)
+        with open(core.PROFILE_PATH, "wb") as fh:
+            fh.write(payload)
+        rc, out, err = core.run(["open", core.PROFILE_PATH])
+        if rc != 0:
+            fail(f"open 失败：{err.strip() or out.strip()}")
+            return 1
+        core.ok("已触发安装。若 30 秒后仍未生效，请到")
+        core.log("  系统设置 → 通用 → 隐私与安全性 → 描述文件 → 选中 → 安装")
+        return 0
+    elif args.action == "remove":
+        cmds = [
+            f"profiles remove -type configuration -identifier {core.PROFILE_IDENTIFIER} -forced 2>/dev/null; true"
+        ]
+        core.as_root_batch(cmds)
+        core.ok("已移除 mublock 描述文件")
+        return 0
+    return 0
+
+
+# --------------------------------------------------------------------------
+# watch
+# --------------------------------------------------------------------------
+
+
+def watch_once() -> int:
+    """复查一次并修复。返回 0 = 一切正常。
+
+    全部检查项都用非特权方式读取，不弹密码框。
+    """
+    os.makedirs(LOG_DIR, exist_ok=True)
+    fixes = []
+
+    # 1) 托管偏好还在吗、还在生效吗
+    delay = core.deferral_active_value()
+    if delay is None:
+        fixes.append("托管偏好丢失或未生效")
+    if not core.badge_suppressed():
+        fixes.append("小红点压制失效")
+
+    # 2) hosts 屏蔽块还在吗、位置对吗
+    try:
+        text = core.read_hosts()
+        if not core.hosts_block_present(text):
+            fixes.append("hosts 屏蔽块丢失")
+        elif core.hosts_block_position(text) != "before":
+            fixes.append("hosts 屏蔽块位置错误（被 SwitchHosts 挤到标记之后）")
+    except RuntimeError:
+        fixes.append("hosts 无法读取")
+
+    if not fixes:
+        core.log(f"{time.strftime('%Y-%m-%d %H:%M:%S')} 一切正常")
+        return 0
+
+    core.log(f"{time.strftime('%Y-%m-%d %H:%M:%S')} 发现问题：{'; '.join(fixes)}")
+    # 修复需要提权，只做一次
+    if any("托管偏好" in f or "小红点" in f for f in fixes):
+        core.write_managed_prefs(3650)
+    if any("hosts" in f for f in fixes):
+        core.apply_hosts()
+    return 1
+
+
+def install_watch() -> bool:
+    """安装 launchd 定时任务：每小时复查一次。"""
+    os.makedirs(os.path.dirname(LAUNCHD_PATH), exist_ok=True)
+    os.makedirs(LOG_DIR, exist_ok=True)
+    self_path = os.path.abspath(__file__)
+    plist = {
+        "Label": LAUNCHD_LABEL,
+        "ProgramArguments": ["/usr/bin/python3", self_path, "watch", "--once"],
+        "StartInterval": 3600,
+        "RunAtLoad": True,
+        "StandardOutPath": LOG_FILE,
+        "StandardErrorPath": LOG_FILE,
+        "ProcessType": "Background",
+    }
+    import plistlib
+
+    with open(LAUNCHD_PATH, "wb") as fh:
+        plistlib.dump(plist, fh, fmt=plistlib.FMT_XML)
+    core.run(["launchctl", "unload", LAUNCHD_PATH])
+    rc, out, err = core.run(["launchctl", "load", LAUNCHD_PATH])
+    if rc != 0:
+        rc2, out2, err2 = core.run(
+            ["launchctl", "bootstrap", f"gui/{os.getuid()}", LAUNCHD_PATH]
+        )
+        if rc2 != 0:
+            core.warn(f"launchctl 加载失败：{(err2 or out2).strip()}")
+            return False
+    return True
+
+
+def uninstall_watch() -> bool:
+    if not os.path.exists(LAUNCHD_PATH):
+        return True
+    core.run(["launchctl", "unload", LAUNCHD_PATH])
+    core.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"])
+    try:
+        os.unlink(LAUNCHD_PATH)
+    except OSError:
+        pass
+    core.ok("定期复查已停用")
+    return True
+
+
+def cmd_watch(args) -> int:
+    if args.once:
+        return watch_once()
+    if args.install:
+        return 0 if install_watch() else 1
+    if args.uninstall:
+        uninstall_watch()
+        return 0
+    return 0
+
+
+def cmd_doctor(args) -> int:
+    """环境体检——不修改任何东西，用来判断"这台机器能不能自动装"。
+
+    这一条不需要提权，因为所有检查项都能用非特权方式读到。
+    """
+    core.log("=== mublock doctor ===")
+    core.log(f"macOS {core.current_os()}  ({core.run(['uname', '-m'])[1].strip()})")
+    core.log("")
+
+    core.log("[1] 提权能力")
+    if core.is_root():
+        core.ok("当前就是 root")
+    else:
+        rc, _, _ = core.run(["sudo", "-n", "true"])
+        if rc == 0:
+            core.ok("sudo 凭据已缓存，可无感提权")
+        elif sys.stdin is not None and sys.stdin.isatty():
+            core.ok("交互式终端 —— sudo 会正常提示密码")
+        else:
+            core.warn("非交互环境且无缓存凭据：提权会尝试弹 GUI 密码框")
+            core.log("    → 建议改在终端里直接跑 mublock apply")
+
+    core.log("")
+    core.log("[2] 描述文件安装通道（备用路径，非必需）")
+    rc, out, _ = core.run(["profiles", "list", "-type", "configuration"])
+    core.log(f"    profiles 工具可用：{'是' if rc == 0 else '否'}")
+    try:
+        ver = core.run(["profiles", "version"])[1].strip()
+        core.log(f"    版本：{ver}")
+    except Exception:
+        pass
+    core.log("    macOS 26 已移除 `profiles install` → 只能走 open 通道")
+    core.log("    且系统里只要已有任何一个配置描述文件，新文件就会进")
+    core.log("    「待确认」队列需人工点确认 → 所以本工具默认不走这条路")
+
+    core.log("")
+    core.log("[3] hosts 层")
+    if core.switchhosts_present():
+        mode = core.switchhosts_write_mode()
+        core.log(f"    检测到 SwitchHosts（write_mode={mode}）")
+        if mode == "append":
+            core.log("    → append 模式只保留标记之前的内容，屏蔽块必须放在标记【之前】")
+        else:
+            core.log("    → 非 append 模式，屏蔽块位置不受此限制")
+    else:
+        core.log("    未检测到 SwitchHosts")
+    try:
+        text = core.read_hosts()
+        pos = core.hosts_block_position(text)
+        if pos == "before":
+            core.ok("屏蔽块在位且位置正确")
+        elif pos == "after":
+            core.warn("屏蔽块位置错误（在 SwitchHosts 标记之后，刷新会被抹掉）")
+        else:
+            core.log("    尚无屏蔽块")
+    except RuntimeError as exc:
+        core.warn(str(exc))
+
+    core.log("")
+    core.log("[4] 解析器实际行为")
+    reachable = core.catalog_reachable()
+    if reachable:
+        core.ok("更新目录可达（hosts 未拦截）")
+    else:
+        core.ok("更新目录被 hosts 拦截（解析到 127.0.0.1）")
+
+    core.log("")
+    core.log("[5] 当前屏蔽状态")
+    st = core.effective_status()
+    core.log(f"    延迟层：{'已生效 ' + str(st['delay_days']) + ' 天' if st['deferral_installed'] else '未生效'}")
+    core.log(f"    目录可达：{'是' if st['catalog_reachable'] else '否'}")
+    core.log(f"    结论：{st['conclusion']}")
+    core.log("")
+    return 0
+
+
+# --------------------------------------------------------------------------
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(
+        prog="mublock",
+        description="macOS 大版本升级屏蔽工具（基于配置描述文件 + hosts + 偏好三层）",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("status", help="查看各层状态").set_defaults(func=cmd_status)
+    sub.add_parser("doctor", help="环境体检（只读，不改任何东西）").set_defaults(
+        func=cmd_doctor
+    )
+
+    pa = sub.add_parser("apply", help="应用全部屏蔽层")
+    pa.add_argument("--delay", type=int, default=3650, help="延迟天数（默认 3650）")
+    pa.add_argument("--watch", action="store_true", help="同时启用定期复查")
+    pa.add_argument(
+        "--no-hosts",
+        action="store_true",
+        help="不写 hosts 层。只用托管偏好时，macOS 27 同样被压住，"
+             "但系统仍能正常检查【次要/安全】更新，也不会让 "
+             "softwareupdate 报 TLS 错误。",
+    )
+    pa.set_defaults(func=cmd_apply)
+
+    pr = sub.add_parser("restore", help="撤销全部屏蔽层")
+    pr.add_argument(
+        "--keep-hosts",
+        action="store_true",
+        help="保留 hosts 屏蔽块，只撤托管偏好和系统域偏好。",
+    )
+    pr.set_defaults(func=cmd_restore)
+
+    sub.add_parser("verify", help="实测验证屏蔽是否生效").set_defaults(func=cmd_verify)
+
+    pp = sub.add_parser("profile", help="描述文件子命令")
+    pp.add_argument("action", choices=["generate", "install", "remove"])
+    pp.add_argument("--delay", type=int, default=3650)
+    pp.set_defaults(func=cmd_profile)
+
+    pw = sub.add_parser("watch", help="定期复查")
+    pw.add_argument("--once", action="store_true", help="执行一次复查后退出")
+    pw.add_argument("--install", action="store_true", help="安装 launchd 任务")
+    pw.add_argument("--uninstall", action="store_true", help="卸载 launchd 任务")
+    pw.set_defaults(func=cmd_watch)
+
+    args = p.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

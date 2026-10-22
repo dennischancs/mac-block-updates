@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+*.swp
+
+# 工具运行产生的状态
+mublock/state/
+mublock/mublock.mobileconfig
+state/
+*.mobileconfig
+
+# 测试产物
+/tmp/
+*.out
+*.tmp
