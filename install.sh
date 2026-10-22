@@ -12,6 +12,11 @@
 #
 # 镜像优先级：jsDelivr → GitHub Raw → ghfast 代理
 # 全部失败时给出明确提示，不会静默退出。
+#
+# 关于 CDN 缓存：jsDelivr 按 URL 路径缓存，query 参数绕不过，
+# 缓存未刷新时用户会拿到旧版脚本。因此下载后会校验脚本里的
+# VERSION 字段，与本安装器的 MIN_VERSION 不一致就换下一个源。
+MIN_VERSION="2.0.0"
 
 set -u
 
@@ -35,12 +40,21 @@ for url in $MIRRORS; do
     log "[..] 尝试：${url}"
     if curl -fsSL --connect-timeout 8 --max-time 90 "$url" -o /tmp/mac-block-updates.sh 2>/dev/null; then
         # 校验拿到的是不是一个合理的 shell 脚本
-        if head -1 /tmp/mac-block-updates.sh | grep -qE '^#!.*(ba)?sh'; then
-            PICKED="$url"
-            log "[ok] 下载成功"
-            break
+        if ! head -1 /tmp/mac-block-updates.sh | grep -qE '^#!.*(ba)?sh'; then
+            fail "[!!] 下载内容不像 shell 脚本，换下一个源"
+            continue
         fi
-        fail "[!!] 下载内容不像 shell 脚本，换下一个源"
+
+        # 校验版本：CDN 缓存未刷新时会给旧版，换下一个源
+        GOT=$(sed -n 's/^VERSION="\([^"]*\)".*/\1/p' /tmp/mac-block-updates.sh | head -1)
+        if [ -n "$GOT" ] && [ "$GOT" != "$MIN_VERSION" ]; then
+            fail "[!!] 该源返回的是旧版 (v${GOT}，期望 v${MIN_VERSION})，换下一个源"
+            continue
+        fi
+
+        PICKED="$url"
+        log "[ok] 下载成功（版本 v${GOT:-未知}）"
+        break
     else
         fail "[!!] 该源不可达，换下一个源"
     fi
